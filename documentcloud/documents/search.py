@@ -453,7 +453,7 @@ def _access_filter(user):
             access_filter += f" OR (projects_edit_access:({projects}))"
         return ["!access:invisible", access_filter]
     else:
-        return ["access:public AND status:(success readable)"]
+        return ["filter(access:public AND status:(success readable))"]
 
 
 def _paginate(query_params, user):

@@ -664,12 +664,12 @@ class Note(models.Model):
     def solr(self):
         """Get a solr document to index this note"""
         return {
-            "id": f"{self.document_id}-{self.id}",
+            "id": f"N{self.id}",
             "type": "note",
             "user": self.user_id,
             "organization": self.organization_id,
             "access": Access.attributes[self.access],
-            "page_number_i": self.page_number,
+            "page_count": self.page_number,
             "title": self.title,
             "description": self.content,
             "created_at": format_date(self.created_at),
