@@ -16,10 +16,10 @@ from luqum.utils import LuceneTreeTransformer, LuceneTreeVisitor
 # DocumentCloud
 from documentcloud.core.pagination import PageNumberPagination
 from documentcloud.documents.constants import DATA_KEY_REGEX
-from documentcloud.documents.models import Document
 from documentcloud.documents.search_escape import escape
 from documentcloud.organizations.models import Organization
 from documentcloud.organizations.serializers import OrganizationSerializer
+from documentcloud.projects.choices import CollaboratorAccess
 from documentcloud.users.models import User
 from documentcloud.users.serializers import UserSerializer
 
@@ -112,6 +112,30 @@ def search(user, query_params):
         "hl.requireFieldMatch": settings.SOLR_HL_REQUIRE_FIELD_MATCH,
         "hl.highlightMultiTerm": settings.SOLR_HL_MULTI_TERM,
     }
+    if user.is_authenticated and user.feature_level >= 1 and text_query != "*:*":
+        # turn note queries on for all pro users
+        # *:* returns all documents, do not enable note queries
+        text_query = _add_note_query(text_query, user)
+        # XXX check this doesnt allow them to send their own _query_ searches
+        kwargs["uf"] = "* _query_ -edit_access"
+
+    # these are for calculating edit access
+    if user.is_authenticated:
+        organizations = user.organizations.all()
+        projects = user.projects.filter(
+            collaboration__access__in=(
+                CollaboratorAccess.admin,
+                CollaboratorAccess.edit,
+            )
+        )
+        kwargs.update(
+            {
+                "qq_user": user.pk,
+                "notes.qq_user": user.pk,
+                "qq_organizations": ",".join(str(o.pk) for o in organizations),
+                "qq_projects": ",".join(str(p.pk) for p in projects),
+            }
+        )
 
     results = SOLR.search(text_query, **kwargs)
     response = _format_response(results, query_params, user, page, rows, escaped)
@@ -453,7 +477,7 @@ def _access_filter(user):
             access_filter += f" OR (projects_edit_access:({projects}))"
         return ["!access:invisible", access_filter]
     else:
-        return ["access:public AND status:(success readable)"]
+        return ["filter(access:public AND status:(success readable))"]
 
 
 def _paginate(query_params, user):
@@ -507,9 +531,7 @@ def _format_response(results, query_params, user, page, per_page, escaped):
     expands = query_params.get("expand", "").split(",")
     count = results.hits
 
-    results = _add_edit_access(
-        user, _add_asset_url(_format_data(_format_highlights(results)))
-    )
+    results = _add_asset_url(_format_notes(_format_data(_format_highlights(results))))
     if "user" in expands:
         results = _expand_users(results)
     if "organization" in expands:
@@ -549,6 +571,51 @@ def _format_highlights(results):
     return [{**r, "highlights": results.highlighting.get(r["id"])} for r in results]
 
 
+def _format_notes(results):
+    """Put note data into the proper format"""
+
+    def transform_notes(notes):
+        """Note IDs have a leading N to distinguish them from document IDs -
+          we strip them here
+        """
+        return [{**n, "id": n["id"][1:]} for n in notes]
+
+    def format_note(result):
+        """Notes are in the `docs` key as returned from Solr
+        We merge in the Org notes only if the user has edit access to this document
+        """
+        result["notes"] = transform_notes(result["notes"]["docs"])
+        if result["edit_access"]:
+            notes = result["notes"]
+            org_notes = transform_notes(result["org_notes"]["docs"])
+            # merge two lists of sorted notes, removing duplicates
+            result["notes"] = []
+            while notes or org_notes:
+                # if either list runs out, just add the rest of the other list
+                if notes and not org_notes:
+                    result["notes"].extend(notes)
+                    notes.clear()
+                elif not notes and org_notes:
+                    result["notes"].extend(org_notes)
+                    org_notes.clear()
+                # if they are the same, merge them
+                elif notes[0]["id"] == org_notes[0]["id"]:
+                    result["notes"].append(notes.pop(0))
+                    org_notes.pop(0)
+                # otherwise take the note with the lower page number and append it next
+                elif notes[0]["page_number"] <= org_notes[0]["page_number"]:
+                    result["notes"].append(notes.pop(0))
+                else:
+                    result["notes"].append(org_notes.pop(0))
+
+        # remove org_notes from the document
+        result.pop("org_notes")
+
+        return result
+
+    return [format_note(r) for r in results]
+
+
 def _add_asset_url(results):
     from documentcloud.documents.tasks import solr_index
 
@@ -564,22 +631,6 @@ def _add_asset_url(results):
             result["asset_url"] = settings.PUBLIC_ASSET_URL
         else:
             result["asset_url"] = settings.PRIVATE_ASSET_URL
-    return results
-
-
-def _add_edit_access(user, results):
-    """Add edit_access to results"""
-    ids = [r["id"] for r in results]
-    editable_documents = [
-        str(id_)
-        for id_ in Document.objects.get_editable(user)
-        .filter(id__in=ids)
-        .values_list("id", flat=True)
-    ]
-    for result in results:
-        # access and status should always be available, re-index if they are not
-        result["edit_access"] = result["id"] in editable_documents
-
     return results
 
 
@@ -606,3 +657,46 @@ def _expand(results, key, queryset, serializer):
         else:
             result[key] = obj_dict.get(result[key])
     return results
+
+
+def _add_note_query(text_query, user):
+    organizations = " ".join(str(o.pk) for o in user.organizations.all())
+    projects = " ".join(
+        str(p.pk)
+        for p in user.projects.filter(
+            collaboration__access__in=(
+                CollaboratorAccess.admin,
+                CollaboratorAccess.edit,
+            )
+        )
+    )
+    # XXX test this!
+    return (
+        # the original query to search for in documents
+        f"({text_query}) "
+        # search through notes which are public or that you own
+        # on all documents you can view
+        f"""
+        _query_:"{{!parent which=type:document score=total
+            v='+type:note +(access:public OR user:{user.pk})
+               +(title:({text_query}) description:({text_query}))'
+        }}"
+        """
+        # search through notes which are organization access
+        # on all documents you can edit
+        f"""
+        _query_:"
+            +(
+                (
+                    (user:{user.pk} OR projects_edit_access:({projects}))
+                    AND access:(private organization)
+                )
+                OR
+                (access:(public organization) AND organization:({organizations}))
+            )
+            +{{!parent which=type:document score=total 
+                v='+type:note +(access:organization)
+                   +(title:({text_query}) description:({text_query}))'}}
+            "
+        """
+    )
