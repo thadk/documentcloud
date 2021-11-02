@@ -3,7 +3,7 @@ from django.contrib.postgres.fields.jsonb import KeyTextTransform
 from django.db import models
 from django.db.models.aggregates import Max
 from django.db.models.functions import Cast
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 
 # Third Party
 from squarelet_auth.users.models import User as SAUser
