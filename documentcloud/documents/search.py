@@ -650,6 +650,22 @@ def _add_asset_url(results):
     return results
 
 
+def _add_edit_access(user, results):
+    """Add edit_access to results"""
+    ids = [r["id"] for r in results]
+    editable_documents = [
+        str(id_)
+        for id_ in Document.objects.get_editable(user)
+        .filter(id__in=ids)
+        .values_list("id", flat=True)
+    ]
+    for result in results:
+        # access and status should always be available, re-index if they are not
+        result["edit_access"] = result["id"] in editable_documents
+
+    return results
+
+
 def _expand_users(results):
     return _expand(results, "user", User.objects.preload(), UserSerializer)
 
