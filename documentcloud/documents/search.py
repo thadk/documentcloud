@@ -16,6 +16,7 @@ from luqum.utils import LuceneTreeTransformer, LuceneTreeVisitor
 # DocumentCloud
 from documentcloud.core.pagination import PageNumberPagination
 from documentcloud.documents.constants import DATA_KEY_REGEX
+from documentcloud.documents.models import Document
 from documentcloud.documents.search_escape import escape
 from documentcloud.organizations.models import Organization
 from documentcloud.organizations.serializers import OrganizationSerializer
